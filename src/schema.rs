@@ -1,6 +1,7 @@
 table! {
-    messages (id) {
+    omikujis (id) {
         id -> Unsigned<Integer>,
+        photo -> Nullable<Varchar>,
         message -> Varchar,
         vote_count -> Integer,
         tg_id -> Bigint,

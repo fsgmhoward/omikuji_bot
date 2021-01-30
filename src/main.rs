@@ -20,13 +20,16 @@ async fn main() -> Result<(), Error> {
         // If the received update contains a new message...
         let update = update?;
         match update.kind {
-            UpdateKind::Message(tg_message) => {
-                // Extract text if the message is of kind Text
-                if let MessageKind::Text { ref data, .. } = tg_message.kind {
-                    // Print received text message to stdout.
-                    println!("<{}>: {}", &tg_message.from.first_name, data);
+            UpdateKind::Message(message) => {
+                // Print received text message to stdout.
 
-                    message_entry(&tg_message, &api).await?;
+                message_entry(&message, &api).await?;
+                // TODO: Remove debug codes
+                // Extract text if the message is of kind Text
+                if let MessageKind::Text { ref data, .. } = message.kind {
+                    println!("<{}>: {}", &message.from.first_name, data);
+                } else {
+                    println!("<{}>: Non-text message", &message.from.first_name);
                 }
             }
             UpdateKind::CallbackQuery(callback) => {

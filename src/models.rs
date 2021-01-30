@@ -1,8 +1,9 @@
-use super::schema::messages;
+use super::schema::omikujis;
 
 #[derive(Queryable, Identifiable, Debug)]
-pub struct Message {
+pub struct Omikuji {
     pub id: u32,
+    pub photo: Option<String>,
     pub message: String,
     pub vote_count: i32,
     pub tg_id: i64,
@@ -12,8 +13,8 @@ pub struct Message {
 }
 
 #[derive(Insertable)]
-#[table_name = "messages"]
-pub struct NewMessage<'a> {
+#[table_name = "omikujis"]
+pub struct NewOmikuji<'a> {
     pub message: &'a str,
     pub tg_id: i64,
     pub tg_name: &'a str,
@@ -79,7 +80,7 @@ pub enum OmikujiSection {
     Other(String, String),
 }
 
-pub struct Omikuji {
+pub struct OmikujiMessage {
     pub class: OmikujiClass,
     pub sections: Vec<OmikujiSection>,
 }
