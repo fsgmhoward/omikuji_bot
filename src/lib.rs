@@ -8,12 +8,18 @@ use async_trait::async_trait;
 use diesel::mysql::MysqlConnection;
 use diesel::prelude::*;
 use rand::{thread_rng, Rng};
+use std::collections::HashMap;
 use std::env;
+use std::str::FromStr;
+use strum::IntoEnumIterator;
 use telegram_bot::Error;
 use telegram_bot::*;
 
 pub mod models;
 pub mod schema;
+
+use models::OmikujiClass;
+use models::OmikujiMessage;
 
 diesel_migrations::embed_migrations!();
 
@@ -22,7 +28,7 @@ diesel_migrations::embed_migrations!();
 //
 
 #[async_trait]
-pub trait ApiExtension {
+trait ApiExtension {
     async fn send_message(&self, to: &User, message: &str) -> Result<(), Error>;
     async fn send_photo(&self, to: &User, photo: &String) -> Result<(), Error>;
 }
@@ -37,6 +43,25 @@ impl ApiExtension for Api {
         self.send(SendPhoto::new(to, FileRef::from(photo.clone())))
             .await?;
         Ok(())
+    }
+}
+
+trait HashMapExtension {
+    fn get_user_data(&mut self, user: &User) -> Option<&mut OmikujiMessage>;
+    fn new_user_data(&mut self, user: &User);
+}
+
+impl HashMapExtension for HashMap<i64, OmikujiMessage> {
+    fn get_user_data(&mut self, user: &User) -> Option<&mut OmikujiMessage> {
+        self.get_mut(&i64::from(user.id))
+    }
+
+    fn new_user_data(&mut self, user: &User) {
+        let omikuji_message = OmikujiMessage {
+            class: OmikujiClass::Unknown,
+            sections: Vec::new(),
+        };
+        self.insert(i64::from(user.id), omikuji_message);
     }
 }
 
@@ -75,15 +100,6 @@ pub fn new_omikuji(message: &str, from: &User, connection: &MysqlConnection) {
         .expect("Failed to insert!");
 }
 
-// If upvote == true, ++vote_count, -- otherwise
-pub fn vote(omikuji: &models::Omikuji, upvote: bool, connection: &MysqlConnection) {
-    use schema::omikujis::dsl::vote_count;
-    diesel::update(omikuji)
-        .set(vote_count.eq(omikuji.vote_count + (if upvote { 1 } else { -1 })))
-        .execute(connection)
-        .expect(format!("Failed to update vote_count for omikuji {:?}", omikuji).as_str());
-}
-
 pub fn get_random_omikuji(connection: &MysqlConnection) -> Option<models::Omikuji> {
     use schema::omikujis::dsl::{id, omikujis, vote_count};
     let count: i64 = omikujis
@@ -112,7 +128,11 @@ pub fn get_random_omikuji(connection: &MysqlConnection) -> Option<models::Omikuj
 //
 
 // Entry for all messages received
-pub async fn message_entry(message: &Message, api: &Api) -> Result<(), Error> {
+pub async fn message_entry(
+    message: &Message,
+    api: &Api,
+    store: &mut HashMap<i64, OmikujiMessage>,
+) -> Result<(), Error> {
     let from = &message.from;
     match message.kind {
         MessageKind::Text { ref data, .. } => {
@@ -120,7 +140,9 @@ pub async fn message_entry(message: &Message, api: &Api) -> Result<(), Error> {
             if data.as_bytes()[0] == b'/' {
                 // We consider all messages starting with '/' as a command
                 match data.as_str() {
-                    "/start" => welcome(message, api).await?,
+                    "/start" => start(from, api).await?,
+                    "/about" => about(from, api).await?,
+                    "/debug" => debug(from, api, store).await?,
                     _ => {
                         api.send_message(
                             from,
@@ -130,6 +152,32 @@ pub async fn message_entry(message: &Message, api: &Api) -> Result<(), Error> {
                     }
                 };
                 return Ok(());
+            }
+
+            // Check if the user has a pending omikuji which is yet to be submitted
+            if let Some(omikuji_message) = store.get_user_data(from) {
+                // Determine which part this message is updating
+                let section_count = omikuji_message.sections.len();
+                if section_count == 0 {
+                    api.send_message(
+                        from,
+                        "You will need to select a section type before entering any description!",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                let (_, description) = &mut omikuji_message.sections[section_count - 1];
+                if description != "" {
+                    // We don't modify a section if it already has description
+                    api.send_message(
+                        from,
+                        "You will need to select a section type before entering any description!",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                description.clear();
+                description.push_str(data.as_str());
             }
 
             // Show them a welcome message for any text input
@@ -162,6 +210,7 @@ pub async fn message_entry(message: &Message, api: &Api) -> Result<(), Error> {
 pub async fn callback_entry(
     callback: &CallbackQuery,
     api: &Api,
+    store: &mut HashMap<i64, OmikujiMessage>,
     connection: &MysqlConnection,
 ) -> Result<(), Error> {
     let from = &callback.from;
@@ -185,44 +234,10 @@ pub async fn callback_entry(
             .await?;
         }
         match command {
-            // TODO
-            "new" => draw(from, api, connection).await?,
+            "new" => new(from, api, store).await?,
             "draw" => draw(from, api, connection).await?,
-            "vote" => {
-                use schema::omikujis::dsl::{id, omikujis};
-                if payload.len() <= 1 {
-                    // Malformed payload - this should be +<id> or -<id>
-                    api.send_message(from, "Malformed callback request.")
-                        .await?;
-                    return Ok(());
-                }
-                let omikuji_id = &payload[1..payload.len()];
-                if let Ok(omikuji_id) = omikuji_id.parse::<u32>() {
-                    let omikuji = omikujis
-                        .filter(id.eq(omikuji_id))
-                        .limit(1)
-                        .get_result(connection);
-                    if let Ok(omikuji) = omikuji {
-                        let is_upvote = payload.as_bytes()[0] == b'+';
-                        vote(&omikuji, is_upvote, connection);
-                        api.send_message(
-                            from,
-                            format!(
-                                "Successfully {} the omikuji slip!",
-                                if is_upvote { "upvoted" } else { "downvoted" }
-                            )
-                            .as_str(),
-                        )
-                        .await?;
-                    } else {
-                        api.send_message(from, "Requested omikuji cannot be found.")
-                            .await?;
-                    }
-                } else {
-                    api.send_message(from, "Malformed callback request.")
-                        .await?;
-                }
-            }
+            "class" => class(from, api, store, payload).await?,
+            "vote" => vote(from, api, connection, payload).await?,
             _ => {
                 api.send_message(from, "Callback query is not recognized!")
                     .await?;
@@ -244,10 +259,9 @@ pub async fn callback_entry(
 //
 
 // Action 0: Welcome a new user, and also reset previous keyboard
-async fn welcome(message: &Message, api: &Api) -> Result<(), Error> {
-    let chat = &message.chat;
+async fn start(from: &User, api: &Api) -> Result<(), Error> {
     api.send(
-        SendMessage::new(chat, "Welcome to use NUSCAS's Omikuji Bot!")
+        SendMessage::new(from, "Welcome to use NUSCAS's Omikuji Bot!")
             .reply_markup(reply_markup!(remove_keyboard)),
     )
     .await?;
@@ -255,8 +269,62 @@ async fn welcome(message: &Message, api: &Api) -> Result<(), Error> {
         "Create new Omikuji" callback "new",
         "Draw an Omikuji slip" callback "draw"
     ]);
-    api.send(SendMessage::new(chat, "Pick what you want to do!").reply_markup(keyboard))
+    api.send(SendMessage::new(from, "Pick what you want to do!").reply_markup(keyboard))
         .await?;
+    Ok(())
+}
+
+async fn about(from: &User, api: &Api) -> Result<(), Error> {
+    api.send_message(
+        from,
+        "This is a bot used for storing and drawing Omikuji strips, written by @FSGMHoward.",
+    )
+    .await?;
+    Ok(())
+}
+
+// Print out the current strip
+async fn debug(
+    from: &User,
+    api: &Api,
+    store: &mut HashMap<i64, OmikujiMessage>,
+) -> Result<(), Error> {
+    if let Some(omikuji_message) = store.get_user_data(from) {
+        api.send_message(from, format!("{:?}", omikuji_message).as_str())
+            .await?;
+    } else {
+        api.send_message(from, "No omikuji strip stored.").await?;
+    }
+    Ok(())
+}
+
+async fn new(
+    from: &User,
+    api: &Api,
+    store: &mut HashMap<i64, OmikujiMessage>,
+) -> Result<(), Error> {
+    if let Some(_) = store.get_user_data(from) {
+        api.send_message(
+            from,
+            "You have to complete your previous strip before creating a new one.",
+        )
+        .await?;
+        return Ok(());
+    }
+    store.new_user_data(from);
+
+    let mut keyboard = InlineKeyboardMarkup::new();
+    for class in OmikujiClass::iter() {
+        let class = format!("{:?}", class);
+        let button = InlineKeyboardButton::callback(&class, format!("class/{}", class));
+        keyboard.add_row(vec![button]);
+    }
+
+    api.send(
+        SendMessage::new(from, "Ok. Select a class from below!")
+            .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -266,13 +334,88 @@ async fn draw(from: &User, api: &Api, connection: &MysqlConnection) -> Result<()
     if let Some(omikuji) = omikuji {
         // only send if a message is available
         let keyboard = reply_markup!(inline_keyboard, [
-            "This slip is well written" callback ("vote/+".to_owned() + &omikuji.id.to_string()),
-            "I feel insulted :(" callback ("vote/-".to_owned() + &omikuji.id.to_string())
+            "This slip is well written" callback (format!("vote/+{}", omikuji.id.to_string())),
+            "I feel insulted :(" callback (format!("vote/-{}", omikuji.id.to_string()))
         ]);
         api.send(SendMessage::new(from, omikuji.message).reply_markup(keyboard))
             .await?;
     } else {
         api.send_message(from, "Oops! Our omikuji library is empty.")
+            .await?;
+    }
+    Ok(())
+}
+
+// Update the class of the omikuji strip
+async fn class(
+    from: &User,
+    api: &Api,
+    store: &mut HashMap<i64, OmikujiMessage>,
+    payload: &str,
+) -> Result<(), Error> {
+    if let Some(omikuji_message) = store.get_user_data(from) {
+        if let OmikujiClass::Unknown = omikuji_message.class {
+            if let Ok(class) = OmikujiClass::from_str(payload) {
+                omikuji_message.class = class;
+                // TODO let them add a section now
+            } else {
+                api.send_message(from, "Malformed callback request.")
+                    .await?;
+            }
+        } else {
+            api.send_message(from, "You have already set the class of this strip.")
+                .await?;
+        }
+    } else {
+        api.send_message(
+            from,
+            "You have to create a new omikuji strip before calling `class` callback.",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn vote(
+    from: &User,
+    api: &Api,
+    connection: &MysqlConnection,
+    payload: &str,
+) -> Result<(), Error> {
+    use schema::omikujis::dsl::{id, omikujis, vote_count};
+    if payload.len() <= 1 {
+        // Malformed payload - this should be +<id> or -<id>
+        api.send_message(from, "Malformed callback request.")
+            .await?;
+        return Ok(());
+    }
+    let omikuji_id = &payload[1..payload.len()];
+    if let Ok(omikuji_id) = omikuji_id.parse::<u32>() {
+        let omikuji = omikujis
+            .filter(id.eq(omikuji_id))
+            .limit(1)
+            .get_result(connection);
+        if let Ok(omikuji) = omikuji {
+            let is_upvote = payload.as_bytes()[0] == b'+';
+            diesel::update(&omikuji)
+                .set(vote_count.eq(&omikuji.vote_count + (if is_upvote { 1 } else { -1 })))
+                .execute(connection)
+                .expect(format!("Failed to update vote_count for omikuji {:?}", &omikuji).as_str());
+            api.send_message(
+                from,
+                format!(
+                    "Successfully {} the omikuji slip!",
+                    if is_upvote { "upvoted" } else { "downvoted" }
+                )
+                .as_str(),
+            )
+            .await?;
+        } else {
+            api.send_message(from, "Requested omikuji cannot be found.")
+                .await?;
+        }
+    } else {
+        api.send_message(from, "Malformed callback request.")
             .await?;
     }
     Ok(())

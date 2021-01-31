@@ -1,4 +1,7 @@
 use super::schema::omikujis;
+use serde::{Deserialize, Serialize};
+use strum_macros::EnumIter;
+use strum_macros::EnumString;
 
 #[derive(Queryable, Identifiable, Debug)]
 pub struct Omikuji {
@@ -33,6 +36,7 @@ pub struct NewOmikuji<'a> {
 // Half-curse (半凶, han-kyō)
 // Future curse (末凶, sue-kyō)
 // Great curse (大凶, dai-kyō)
+#[derive(Serialize, Deserialize, EnumIter, EnumString, Debug)]
 pub enum OmikujiClass {
     GreatBlessing,
     MiddleBlessing,
@@ -46,6 +50,8 @@ pub enum OmikujiClass {
     HalfCurse,
     FutureCurse,
     GreatCurse,
+    // Default class, indicating the class is not selected
+    Unknown,
 }
 
 // Ref: https://en.wikipedia.org/wiki/O-mikuji (only selected part of the more relevant ones)
@@ -64,23 +70,24 @@ pub enum OmikujiClass {
 // <IGNORED> tenkyo (転居) – moving or changing residence
 // <IGNORED> shussan (出産) – childbirth, delivery
 // <IGNORED> endan (縁談) – marriage proposal or engagement
+#[derive(Serialize, Deserialize, EnumIter, EnumString, Debug)]
 pub enum OmikujiSection {
     // predefined titles, with the String being explanation
-    FortuneDirection(String),
-    Desire(String),
-    PersonWaitedFor(String),
-    LostArticle(String),
-    Travel(String),
-    Business(String),
-    Study(String),
-    Dispute(String),
-    Love(String),
-    Illness(String),
-    // title - explanation
-    Other(String, String),
+    FortuneDirection,
+    Desire,
+    PersonWaitedFor,
+    LostArticle,
+    Travel,
+    Business,
+    Study,
+    Dispute,
+    Love,
+    Illness,
+    Other,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OmikujiMessage {
     pub class: OmikujiClass,
-    pub sections: Vec<OmikujiSection>,
+    pub sections: Vec<(OmikujiSection, String)>,
 }
