@@ -10,6 +10,7 @@ use diesel::prelude::*;
 use rand::{thread_rng, Rng};
 use std::collections::HashMap;
 use std::env;
+use std::fmt::Debug;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
 use telegram_bot::Error;
@@ -20,6 +21,7 @@ pub mod schema;
 
 use models::OmikujiClass;
 use models::OmikujiMessage;
+use models::OmikujiSection;
 
 diesel_migrations::embed_migrations!();
 
@@ -64,6 +66,24 @@ impl HashMapExtension for HashMap<i64, OmikujiMessage> {
         self.insert(i64::from(user.id), omikuji_message);
     }
 }
+
+trait EnumExtension: IntoEnumIterator + Debug {
+    fn to_keyboard(callback_command: &str) -> InlineKeyboardMarkup {
+        let mut keyboard = InlineKeyboardMarkup::new();
+        for section in Self::iter() {
+            let section = format!("{:?}", section);
+            let button = InlineKeyboardButton::callback(
+                &section,
+                format!("{}/{}", callback_command, section),
+            );
+            keyboard.add_row(vec![button]);
+        }
+        return keyboard;
+    }
+}
+
+impl EnumExtension for OmikujiClass {}
+impl EnumExtension for OmikujiSection {}
 
 //
 // Helper functions for database connection
@@ -154,38 +174,14 @@ pub async fn message_entry(
                 return Ok(());
             }
 
-            // Check if the user has a pending omikuji which is yet to be submitted
-            if let Some(omikuji_message) = store.get_user_data(from) {
-                // Determine which part this message is updating
-                let section_count = omikuji_message.sections.len();
-                if section_count == 0 {
-                    api.send_message(
-                        from,
-                        "You will need to select a section type before entering any description!",
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                let (_, description) = &mut omikuji_message.sections[section_count - 1];
-                if description != "" {
-                    // We don't modify a section if it already has description
-                    api.send_message(
-                        from,
-                        "You will need to select a section type before entering any description!",
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                description.clear();
-                description.push_str(data.as_str());
+            if !update_section(from, api, store, data).await? {
+                // Show user a welcome message for text input if no section has been updated
+                api.send_message(
+                    from,
+                    "Welcome to use NUSCAS's Omikuji Bot!\nTo start, simply type /start",
+                )
+                .await?;
             }
-
-            // Show them a welcome message for any text input
-            api.send_message(
-                from,
-                "Welcome to use NUSCAS's Omikuji Bot!\nTo start, simply type /start",
-            )
-            .await?;
         }
         MessageKind::Photo { ref data, .. } => {
             if data.len() == 0 {
@@ -237,10 +233,14 @@ pub async fn callback_entry(
             "new" => new(from, api, store).await?,
             "draw" => draw(from, api, connection).await?,
             "class" => class(from, api, store, payload).await?,
+            "section" => section(from, api, store, payload).await?,
             "vote" => vote(from, api, connection, payload).await?,
             _ => {
-                api.send_message(from, "Callback query is not recognized!")
-                    .await?;
+                api.send_message(
+                    from,
+                    format!("Callback query {} is not recognized!", command).as_str(),
+                )
+                .await?;
             }
         }
     } else {
@@ -298,6 +298,52 @@ async fn debug(
     Ok(())
 }
 
+// Check if the user has a pending omikuji which is yet to be submitted
+// Return Ok(true) if an omikuji strip is updated or anything wrong occurred
+async fn update_section(
+    from: &User,
+    api: &Api,
+    store: &mut HashMap<i64, OmikujiMessage>,
+    payload: &str,
+) -> Result<bool, Error> {
+    if let Some(omikuji_message) = store.get_user_data(from) {
+        // Determine which part this message is updating
+        let section_count = omikuji_message.sections.len();
+        if section_count == 0 {
+            api.send_message(
+                from,
+                "You will need to select a section type before entering any description!",
+            )
+            .await?;
+            return Ok(true);
+        }
+        let (_, description) = &mut omikuji_message.sections[section_count - 1];
+        if description != "" {
+            // We don't modify a section if it already has description
+            api.send_message(
+                from,
+                "You will need to select a section type before entering any description!",
+            )
+            .await?;
+            return Ok(true);
+        }
+        description.push_str(payload);
+        let mut keyboard = OmikujiSection::to_keyboard("section");
+        keyboard.add_row(vec![InlineKeyboardButton::callback(
+            "Just save what is done!",
+            "save",
+        )]);
+        api.send(
+            SendMessage::new(from, "Sure. Do you want to add a new section or just save?")
+                .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard)),
+        )
+        .await?;
+
+        return Ok(true);
+    }
+    return Ok(false);
+}
+
 async fn new(
     from: &User,
     api: &Api,
@@ -313,12 +359,7 @@ async fn new(
     }
     store.new_user_data(from);
 
-    let mut keyboard = InlineKeyboardMarkup::new();
-    for class in OmikujiClass::iter() {
-        let class = format!("{:?}", class);
-        let button = InlineKeyboardButton::callback(&class, format!("class/{}", class));
-        keyboard.add_row(vec![button]);
-    }
+    let keyboard = OmikujiClass::to_keyboard("class");
 
     api.send(
         SendMessage::new(from, "Ok. Select a class from below!")
@@ -357,7 +398,12 @@ async fn class(
         if let OmikujiClass::Unknown = omikuji_message.class {
             if let Ok(class) = OmikujiClass::from_str(payload) {
                 omikuji_message.class = class;
-                // TODO let them add a section now
+                let keyboard = OmikujiSection::to_keyboard("section");
+                api.send(
+                    SendMessage::new(from, "Ok. Select the first section below.")
+                        .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard)),
+                )
+                .await?;
             } else {
                 api.send_message(from, "Malformed callback request.")
                     .await?;
@@ -370,6 +416,47 @@ async fn class(
         api.send_message(
             from,
             "You have to create a new omikuji strip before calling `class` callback.",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn section(
+    from: &User,
+    api: &Api,
+    store: &mut HashMap<i64, OmikujiMessage>,
+    payload: &str,
+) -> Result<(), Error> {
+    if let Some(omikuji_message) = store.get_user_data(from) {
+        let section_count = omikuji_message.sections.len();
+        if section_count != 0 {
+            let (_, description) = &omikuji_message.sections[section_count - 1];
+            if description == "" {
+                api.send_message(
+                    from,
+                    "You have to type the description for the previous section first",
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+
+        if let Ok(section) = OmikujiSection::from_str(payload) {
+            let reply = format!(
+                "OK. Type your description for section {:?} below!",
+                &section
+            );
+            omikuji_message.sections.push((section, String::new()));
+            api.send_message(from, reply.as_str()).await?;
+        } else {
+            api.send_message(from, "Malformed callback request.")
+                .await?;
+        }
+    } else {
+        api.send_message(
+            from,
+            "You have to create a new omikuji strip before calling `section` callback.",
         )
         .await?;
     }
