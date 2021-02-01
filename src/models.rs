@@ -51,8 +51,6 @@ pub enum OmikujiClass {
     HalfCurse,
     FutureCurse,
     GreatCurse,
-    // Default class, indicating the class is not selected
-    Unknown,
 }
 
 // Ref: https://en.wikipedia.org/wiki/O-mikuji (only selected part of the more relevant ones)
@@ -89,6 +87,6 @@ pub enum OmikujiSection {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OmikujiMessage {
-    pub class: OmikujiClass,
+    pub class: Option<OmikujiClass>,
     pub sections: Vec<(OmikujiSection, String)>,
 }

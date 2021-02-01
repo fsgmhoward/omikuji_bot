@@ -61,7 +61,7 @@ impl HashMapExtension for HashMap<i64, OmikujiMessage> {
 
     fn new_user_data(&mut self, user: &User) {
         let omikuji_message = OmikujiMessage {
-            class: OmikujiClass::Unknown,
+            class: None,
             sections: Vec::new(),
         };
         self.insert(i64::from(user.id), omikuji_message);
@@ -75,13 +75,26 @@ impl HashMapExtension for HashMap<i64, OmikujiMessage> {
 trait EnumExtension: IntoEnumIterator + Debug {
     fn to_keyboard(callback_command: &str) -> InlineKeyboardMarkup {
         let mut keyboard = InlineKeyboardMarkup::new();
+        let mut sections = Vec::<String>::new();
+        // TODO
+        let per_row = 2;
         for section in Self::iter() {
-            let section = format!("{:?}", section);
-            let button = InlineKeyboardButton::callback(
-                &section,
-                format!("{}/{}", callback_command, section),
-            );
-            keyboard.add_row(vec![button]);
+            sections.push(format!("{:?}", section));
+        }
+        for i in (0..sections.len()).step_by(per_row) {
+            let mut buttons = Vec::<InlineKeyboardButton>::new();
+            for j in 0..per_row {
+                let index = i + j;
+                if index >= sections.len() {
+                    break;
+                }
+                let section = &sections[index];
+                buttons.push(InlineKeyboardButton::callback(
+                    section,
+                    format!("{}/{}", callback_command, section),
+                ));
+            }
+            keyboard.add_row(buttons);
         }
         return keyboard;
     }
@@ -169,6 +182,7 @@ pub async fn message_entry(
                 // We consider all messages starting with '/' as a command
                 match data.as_str() {
                     "/start" => start(from, api).await?,
+                    "/cancel" => cancel(from, api, store).await?,
                     "/about" => about(from, api).await?,
                     "/debug" => debug(from, api, store).await?,
                     _ => {
@@ -229,13 +243,17 @@ pub async fn callback_entry(
         };
 
         // We delete the original inline keyboard to prevent it being clicked for 2 times
+        // We will ignore the error generated here
         if let Some(message) = &callback.message {
-            api.send(EditMessageReplyMarkup::new(
-                from,
-                message,
-                None::<ReplyKeyboardMarkup>,
-            ))
-            .await?;
+            #[allow(unused_must_use)]
+            {
+                api.send(EditMessageReplyMarkup::new(
+                    from,
+                    message,
+                    None::<ReplyKeyboardMarkup>,
+                ))
+                .await;
+            }
         }
         match command {
             // Sequence: from, api, store, connection, payload
@@ -268,7 +286,7 @@ pub async fn callback_entry(
 // Functions for different actions
 //
 
-// Action 0: Welcome a new user, and also reset previous keyboard
+// Welcome a new user, and also reset previous keyboard
 async fn start(from: &User, api: &Api) -> Result<(), Error> {
     api.send(
         SendMessage::new(from, "Welcome to use NUSCAS's Omikuji Bot!")
@@ -284,10 +302,21 @@ async fn start(from: &User, api: &Api) -> Result<(), Error> {
     Ok(())
 }
 
+async fn cancel(
+    from: &User,
+    api: &Api,
+    store: &mut HashMap<i64, OmikujiMessage>,
+) -> Result<(), Error> {
+    store.delete_user_data(from);
+    api.send_message(from, "Fine. I have delete current work-in-progress omikuji. You can start a new one by calling /start !").await?;
+    Ok(())
+}
+
 async fn about(from: &User, api: &Api) -> Result<(), Error> {
     api.send_message(
         from,
-        "This is a bot used for storing and drawing Omikuji strips, written by @FSGMHoward.",
+        "This is a bot used for storing and drawing Omikuji strips, written by @FSGMHoward.\n\
+        Source code can be found on https://github.com/fsgmhoward/omikuji_bot",
     )
     .await?;
     Ok(())
@@ -379,17 +408,30 @@ async fn new(
     Ok(())
 }
 
-// Action 1: Draw an omikuji
+// Draw an omikuji
 async fn draw(from: &User, api: &Api, connection: &MysqlConnection) -> Result<(), Error> {
     let omikuji = get_random_omikuji(connection);
     if let Some(omikuji) = omikuji {
+        let omikuji_message: OmikujiMessage = serde_json::from_str(omikuji.message.as_str())?;
+        let mut text = String::from("You draw a omikuji strip:");
+        if let Some(class) = omikuji_message.class {
+            text += format!("\n\n*{:?}*", class).as_str();
+        }
+        for (section_name, description) in omikuji_message.sections {
+            text += format!("\n\n*{:?}*: {}", section_name, description).as_str();
+        }
+
         // only send if a message is available
         let keyboard = reply_markup!(inline_keyboard, [
             "This slip is well written" callback (format!("vote/+{}", omikuji.id.to_string())),
             "I feel insulted :(" callback (format!("vote/-{}", omikuji.id.to_string()))
         ]);
-        api.send(SendMessage::new(from, omikuji.message).reply_markup(keyboard))
-            .await?;
+        api.send(
+            SendMessage::new(from, text)
+                .parse_mode(ParseMode::Markdown)
+                .reply_markup(keyboard),
+        )
+        .await?;
     } else {
         api.send_message(from, "Oops! Our omikuji library is empty.")
             .await?;
@@ -405,21 +447,21 @@ async fn class(
     payload: &str,
 ) -> Result<(), Error> {
     if let Some(omikuji_message) = store.get_user_data(from) {
-        if let OmikujiClass::Unknown = omikuji_message.class {
-            if let Ok(class) = OmikujiClass::from_str(payload) {
-                omikuji_message.class = class;
-                let keyboard = OmikujiSection::to_keyboard("section");
-                api.send(
-                    SendMessage::new(from, "Ok. Select the first section below.")
-                        .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard)),
-                )
-                .await?;
-            } else {
-                api.send_message(from, "Malformed callback request.")
-                    .await?;
-            }
-        } else {
+        if let Some(_) = omikuji_message.class {
             api.send_message(from, "You have already set the class of this strip.")
+                .await?;
+            return Ok(());
+        }
+        if let Ok(class) = OmikujiClass::from_str(payload) {
+            omikuji_message.class = Some(class);
+            let keyboard = OmikujiSection::to_keyboard("section");
+            api.send(
+                SendMessage::new(from, "Ok. Select the first section below.")
+                    .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard)),
+            )
+            .await?;
+        } else {
+            api.send_message(from, "Malformed callback request.")
                 .await?;
         }
     } else {
