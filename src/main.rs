@@ -1,3 +1,4 @@
+use anyhow::Error;
 use dotenv::dotenv;
 use futures::StreamExt;
 use models::OmikujiMessage;

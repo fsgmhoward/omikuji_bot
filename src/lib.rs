@@ -4,6 +4,7 @@ extern crate diesel;
 #[macro_use]
 extern crate diesel_migrations;
 
+use anyhow::Error;
 use async_trait::async_trait;
 use diesel::mysql::MysqlConnection;
 use diesel::prelude::*;
@@ -13,7 +14,6 @@ use std::env;
 use std::fmt::Debug;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
-use telegram_bot::Error;
 use telegram_bot::*;
 
 pub mod models;
@@ -51,6 +51,7 @@ impl ApiExtension for Api {
 trait HashMapExtension {
     fn get_user_data(&mut self, user: &User) -> Option<&mut OmikujiMessage>;
     fn new_user_data(&mut self, user: &User);
+    fn delete_user_data(&mut self, user: &User);
 }
 
 impl HashMapExtension for HashMap<i64, OmikujiMessage> {
@@ -64,6 +65,10 @@ impl HashMapExtension for HashMap<i64, OmikujiMessage> {
             sections: Vec::new(),
         };
         self.insert(i64::from(user.id), omikuji_message);
+    }
+
+    fn delete_user_data(&mut self, user: &User) {
+        self.remove(&i64::from(user.id));
     }
 }
 
@@ -102,7 +107,7 @@ pub fn establish_connection() -> MysqlConnection {
 // Functions for manipulating omikuji records
 //
 
-pub fn new_omikuji(message: &str, from: &User, connection: &MysqlConnection) {
+fn new_omikuji(message: &str, from: &User, connection: &MysqlConnection) {
     let user_id = from.id.into();
     let mut user_name = from.first_name.clone();
     if let Some(last_name) = &from.last_name {
@@ -110,6 +115,8 @@ pub fn new_omikuji(message: &str, from: &User, connection: &MysqlConnection) {
         user_name.push_str(last_name.as_str());
     }
     let omikuji = models::NewOmikuji {
+        // TODO
+        photo: None,
         message: message,
         tg_id: user_id,
         tg_name: &user_name,
@@ -120,7 +127,7 @@ pub fn new_omikuji(message: &str, from: &User, connection: &MysqlConnection) {
         .expect("Failed to insert!");
 }
 
-pub fn get_random_omikuji(connection: &MysqlConnection) -> Option<models::Omikuji> {
+fn get_random_omikuji(connection: &MysqlConnection) -> Option<models::Omikuji> {
     use schema::omikujis::dsl::{id, omikujis, vote_count};
     let count: i64 = omikujis
         .filter(vote_count.gt(-3))
@@ -131,7 +138,8 @@ pub fn get_random_omikuji(connection: &MysqlConnection) -> Option<models::Omikuj
         return None;
     }
     let mut rng = thread_rng();
-    let x: i64 = rng.gen_range(0, count - 1);
+    // Note: gen_range generates a number in range [low, high) so low < high
+    let x: i64 = rng.gen_range(0, count);
     Some(
         omikujis
             .filter(vote_count.gt(-3))
@@ -230,10 +238,12 @@ pub async fn callback_entry(
             .await?;
         }
         match command {
+            // Sequence: from, api, store, connection, payload
             "new" => new(from, api, store).await?,
             "draw" => draw(from, api, connection).await?,
             "class" => class(from, api, store, payload).await?,
             "section" => section(from, api, store, payload).await?,
+            "save" => save(from, api, store, connection).await?,
             "vote" => vote(from, api, connection, payload).await?,
             _ => {
                 api.send_message(
@@ -460,6 +470,38 @@ async fn section(
         )
         .await?;
     }
+    Ok(())
+}
+
+async fn save(
+    from: &User,
+    api: &Api,
+    store: &mut HashMap<i64, OmikujiMessage>,
+    connection: &MysqlConnection,
+) -> Result<(), Error> {
+    if let Some(omikuji_message) = store.get_user_data(from) {
+        let section_count = omikuji_message.sections.len();
+        if section_count != 0 {
+            let (_, description) = &omikuji_message.sections[section_count - 1];
+            // Check whether last section's description is filled in
+            if description != "" {
+                let j = serde_json::to_string(omikuji_message)?;
+                new_omikuji(j.as_str(), from, connection);
+                store.delete_user_data(from);
+                api.send_message(
+                    from,
+                    "Nice! Your omikuji strip has been saved into our database.",
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
+    api.send_message(
+        from,
+        "You have to have a complete omikuji strip before executing `save`.",
+    )
+    .await?;
     Ok(())
 }
 

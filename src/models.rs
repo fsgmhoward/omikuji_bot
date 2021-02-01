@@ -18,6 +18,7 @@ pub struct Omikuji {
 #[derive(Insertable)]
 #[table_name = "omikujis"]
 pub struct NewOmikuji<'a> {
+    pub photo: Option<String>,
     pub message: &'a str,
     pub tg_id: i64,
     pub tg_name: &'a str,

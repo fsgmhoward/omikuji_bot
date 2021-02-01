@@ -20,5 +20,6 @@ serde = "1.0"
 serde_json = "1.0"
 strum = "0.20.0"
 strum_macros = "0.20.1"
+anyhow = "1.0"
 
 # If encountered problem in building h2, try `RUSTFLAGS="--cfg has_std" cargo build`
