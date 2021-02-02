@@ -6,7 +6,6 @@ use strum_macros::EnumString;
 #[derive(Queryable, Identifiable, Debug)]
 pub struct Omikuji {
     pub id: u32,
-    pub photo: Option<String>,
     pub message: String,
     pub vote_count: i32,
     pub tg_id: i64,
@@ -18,7 +17,6 @@ pub struct Omikuji {
 #[derive(Insertable)]
 #[table_name = "omikujis"]
 pub struct NewOmikuji<'a> {
-    pub photo: Option<String>,
     pub message: &'a str,
     pub tg_id: i64,
     pub tg_name: &'a str,
@@ -87,6 +85,7 @@ pub enum OmikujiSection {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OmikujiMessage {
+    pub photo: Option<String>,
     pub class: Option<OmikujiClass>,
     pub sections: Vec<(OmikujiSection, String)>,
 }

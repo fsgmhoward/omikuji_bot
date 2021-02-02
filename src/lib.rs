@@ -11,7 +11,7 @@ use diesel::prelude::*;
 use rand::{thread_rng, Rng};
 use std::collections::HashMap;
 use std::env;
-use std::fmt::Debug;
+use std::fmt;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
 use telegram_bot::*;
@@ -38,7 +38,8 @@ trait ApiExtension {
 #[async_trait]
 impl ApiExtension for Api {
     async fn send_message(&self, to: &User, message: &str) -> Result<(), Error> {
-        self.send(SendMessage::new(to, message)).await?;
+        self.send(SendMessage::new(to, message).parse_mode(ParseMode::Markdown))
+            .await?;
         Ok(())
     }
     async fn send_photo(&self, to: &User, photo: &String) -> Result<(), Error> {
@@ -61,6 +62,7 @@ impl HashMapExtension for HashMap<i64, OmikujiMessage> {
 
     fn new_user_data(&mut self, user: &User) {
         let omikuji_message = OmikujiMessage {
+            photo: None,
             class: None,
             sections: Vec::new(),
         };
@@ -72,7 +74,7 @@ impl HashMapExtension for HashMap<i64, OmikujiMessage> {
     }
 }
 
-trait EnumExtension: IntoEnumIterator + Debug {
+trait EnumExtension: IntoEnumIterator + fmt::Debug {
     fn to_keyboard(callback_command: &str) -> InlineKeyboardMarkup {
         let mut keyboard = InlineKeyboardMarkup::new();
         let mut sections = Vec::<String>::new();
@@ -103,6 +105,18 @@ trait EnumExtension: IntoEnumIterator + Debug {
 impl EnumExtension for OmikujiClass {}
 impl EnumExtension for OmikujiSection {}
 
+impl fmt::Display for OmikujiMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut text = String::new();
+        if let Some(class) = &self.class {
+            text += format!("*{:?}*\n", class).as_str();
+        }
+        for (section_name, description) in &self.sections {
+            text += format!("\n*{:?}*: {}", section_name, description).as_str();
+        }
+        write!(f, "{}", text)
+    }
+}
 //
 // Helper functions for database connection
 //
@@ -128,8 +142,6 @@ fn new_omikuji(message: &str, from: &User, connection: &MysqlConnection) {
         user_name.push_str(last_name.as_str());
     }
     let omikuji = models::NewOmikuji {
-        // TODO
-        photo: None,
         message: message,
         tg_id: user_id,
         tg_name: &user_name,
@@ -173,6 +185,7 @@ pub async fn message_entry(
     message: &Message,
     api: &Api,
     store: &mut HashMap<i64, OmikujiMessage>,
+    connection: &MysqlConnection,
 ) -> Result<(), Error> {
     let from = &message.from;
     match message.kind {
@@ -182,6 +195,7 @@ pub async fn message_entry(
                 // We consider all messages starting with '/' as a command
                 match data.as_str() {
                     "/start" => start(from, api).await?,
+                    "/current" => current(from, api, store).await?,
                     "/cancel" => cancel(from, api, store).await?,
                     "/about" => about(from, api).await?,
                     "/debug" => debug(from, api, store).await?,
@@ -211,10 +225,7 @@ pub async fn message_entry(
                 return Ok(());
             }
             let photo = &data[0].file_id;
-            // TODO
-            api.send_message(from, format!("Image received. ID = {}", photo).as_str())
-                .await?;
-            api.send_photo(from, photo).await?;
+            save(from, api, store, connection, Some(photo.to_string())).await?;
         }
         _ => {
             api.send_message(from, "Sorry, this kind of message is yet to be supported.")
@@ -256,12 +267,13 @@ pub async fn callback_entry(
             }
         }
         match command {
-            // Sequence: from, api, store, connection, payload
+            // Sequence: from, api, store, connection, payload/photo
             "new" => new(from, api, store).await?,
             "draw" => draw(from, api, connection).await?,
             "class" => class(from, api, store, payload).await?,
             "section" => section(from, api, store, payload).await?,
-            "save" => save(from, api, store, connection).await?,
+            "ask_photo" => ask_photo(from, api).await?,
+            "save" => save(from, api, store, connection, None).await?,
             "vote" => vote(from, api, connection, payload).await?,
             _ => {
                 api.send_message(
@@ -299,6 +311,31 @@ async fn start(from: &User, api: &Api) -> Result<(), Error> {
     ]);
     api.send(SendMessage::new(from, "Pick what you want to do!").reply_markup(keyboard))
         .await?;
+    Ok(())
+}
+
+async fn current(
+    from: &User,
+    api: &Api,
+    store: &mut HashMap<i64, OmikujiMessage>,
+) -> Result<(), Error> {
+    if let Some(omikuji_message) = store.get_user_data(from) {
+        api.send_message(
+            from,
+            format!(
+                "This is what you are currently working on:\n\n{}",
+                omikuji_message
+            )
+            .as_str(),
+        )
+        .await?;
+    } else {
+        api.send_message(
+            from,
+            "You don't have an omikuji you are currently working on.",
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -370,7 +407,7 @@ async fn update_section(
         let mut keyboard = OmikujiSection::to_keyboard("section");
         keyboard.add_row(vec![InlineKeyboardButton::callback(
             "Just save what is done!",
-            "save",
+            "ask_photo",
         )]);
         api.send(
             SendMessage::new(from, "Sure. Do you want to add a new section or just save?")
@@ -413,13 +450,12 @@ async fn draw(from: &User, api: &Api, connection: &MysqlConnection) -> Result<()
     let omikuji = get_random_omikuji(connection);
     if let Some(omikuji) = omikuji {
         let omikuji_message: OmikujiMessage = serde_json::from_str(omikuji.message.as_str())?;
-        let mut text = String::from("You draw a omikuji strip:");
-        if let Some(class) = omikuji_message.class {
-            text += format!("\n\n*{:?}*", class).as_str();
+        if let Some(photo) = &omikuji_message.photo {
+            api.send_photo(from, photo).await?;
         }
-        for (section_name, description) in omikuji_message.sections {
-            text += format!("\n\n*{:?}*: {}", section_name, description).as_str();
-        }
+
+        let mut text = String::from("You draw a omikuji strip:\n\n");
+        text += format!("{}", omikuji_message).as_str();
 
         // only send if a message is available
         let keyboard = reply_markup!(inline_keyboard, [
@@ -515,11 +551,20 @@ async fn section(
     Ok(())
 }
 
+async fn ask_photo(from: &User, api: &Api) -> Result<(), Error> {
+    let keyboard = reply_markup!(inline_keyboard, [
+        "No, just save it!" callback "save"
+    ]);
+    api.send(SendMessage::new(from, "Do you want to upload an image of your omikuji strip? Just send me a photo if you want to!").reply_markup(keyboard)).await?;
+    Ok(())
+}
+
 async fn save(
     from: &User,
     api: &Api,
     store: &mut HashMap<i64, OmikujiMessage>,
     connection: &MysqlConnection,
+    photo: Option<String>,
 ) -> Result<(), Error> {
     if let Some(omikuji_message) = store.get_user_data(from) {
         let section_count = omikuji_message.sections.len();
@@ -527,6 +572,7 @@ async fn save(
             let (_, description) = &omikuji_message.sections[section_count - 1];
             // Check whether last section's description is filled in
             if description != "" {
+                omikuji_message.photo = photo;
                 let j = serde_json::to_string(omikuji_message)?;
                 new_omikuji(j.as_str(), from, connection);
                 store.delete_user_data(from);

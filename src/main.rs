@@ -27,7 +27,7 @@ async fn main() -> Result<(), Error> {
             UpdateKind::Message(message) => {
                 // Print received text message to stdout.
 
-                message_entry(&message, &api, &mut store).await?;
+                message_entry(&message, &api, &mut store, &connection).await?;
                 // TODO: Remove debug codes
                 // Extract text if the message is of kind Text
                 if let MessageKind::Text { ref data, .. } = message.kind {
