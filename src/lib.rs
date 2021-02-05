@@ -198,6 +198,7 @@ pub async fn message_entry(
             if data.as_bytes()[0] == b'/' {
                 // We consider all messages starting with '/' as a command
                 match data.as_str() {
+                    "/help" => help(from, api).await?,
                     "/start" => start(from, api).await?,
                     "/current" => current(from, api, store).await?,
                     "/cancel" => cancel(from, api, store).await?,
@@ -223,7 +224,7 @@ pub async fn message_entry(
                 // Show user a welcome message for text input if no section has been updated
                 api.send_message(
                     from,
-                    "Welcome to use NUSCAS's Omikuji Bot!\nTo start, simply type /start",
+                    "Welcome to use NUSCAS's Omikuji Bot!\nTo start, simply type /start. You can also call /help for more information.",
                 )
                 .await?;
             }
@@ -307,6 +308,25 @@ pub async fn callback_entry(
 // Functions for different actions
 //
 
+// Prints out the help message
+async fn help(from: &User, api: &Api) -> Result<(), Error> {
+    let help_message = "NUSCAS Omikuji Bot\n\n\
+        *Available commands:*\n\
+        - /start - draw or save omikuji strips\n\
+        - /about - show link to this bot's repository\n\
+        - /help - print this message again\n\
+        \n\
+        *When you are working on a new omikuji:*\n\
+        - /current - print out current strip\n\
+        - /cancel - cancel and delete current strip\n\
+        - /debug - similar to /current but print out raw message for debug purposes\n\
+        \n\
+        You may use [Telegram Markdown](https://sourceforge.net/p/telegram/wiki/markdown_syntax/) \
+        to format your message as well when entering descriptions.";
+    api.send_message(from, help_message).await?;
+    Ok(())
+}
+
 // Welcome a new user, and also reset previous keyboard
 async fn start(from: &User, api: &Api) -> Result<(), Error> {
     api.send(
@@ -354,7 +374,12 @@ async fn cancel(
     store: &mut HashMap<i64, OmikujiMessage>,
 ) -> Result<(), Error> {
     store.delete_user_data(from);
-    api.send_message(from, "Fine. I have delete current work-in-progress omikuji. You can start a new one by calling /start !").await?;
+    api.send_message(
+        from,
+        "Fine. I have delete current work-in-progress omikuji. \
+    You can start a new one by calling /start !",
+    )
+    .await?;
     Ok(())
 }
 
@@ -469,8 +494,12 @@ async fn new(
     let keyboard = OmikujiClass::to_keyboard("class");
 
     api.send(
-        SendMessage::new(from, "Ok. Select a class from below!")
-            .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard)),
+        SendMessage::new(
+            from,
+            "Ok. Select a class from below! \
+        (Tip: You can use /current to check the omikuji you are working on)",
+        )
+        .reply_markup(ReplyMarkup::InlineKeyboardMarkup(keyboard)),
     )
     .await?;
     Ok(())
@@ -520,10 +549,18 @@ async fn class(
             return Ok(());
         }
         if let Ok(class) = OmikujiClass::from_str(payload) {
-            api.send_message(from, "Sure! Can you write a brief description for it?")
-                .await?;
+            api.send_message(
+                from,
+                "Sure! Can you write a brief description for it (simple Markdown can be used)?",
+            )
+            .await?;
             if let OmikujiClass::Other = class {
-                api.send_message(from, "Since you choose `Other` for the class, probably you want to name your class in the description as well?").await?;
+                api.send_message(
+                    from,
+                    "Since you choose `Other` for the class, \
+                probably you want to name your class in the description as well?",
+                )
+                .await?;
             }
             omikuji_message.class = Some(class);
         } else {
@@ -601,7 +638,9 @@ async fn ask_photo(from: &User, api: &Api) -> Result<(), Error> {
     let keyboard = reply_markup!(inline_keyboard, [
         "No, just save it!" callback "save"
     ]);
-    api.send(SendMessage::new(from, "Do you want to upload an image of your omikuji strip? Just send me a photo if you want to!").reply_markup(keyboard)).await?;
+    api.send(SendMessage::new(from,
+        "Do you want to upload an image of your omikuji strip? Just send me a photo if you want to! \
+        (Just send normally and don't choose the 'send without compression')").reply_markup(keyboard)).await?;
     Ok(())
 }
 
