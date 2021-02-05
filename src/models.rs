@@ -49,6 +49,7 @@ pub enum OmikujiClass {
     HalfCurse,
     FutureCurse,
     GreatCurse,
+    Other,
 }
 
 // Ref: https://en.wikipedia.org/wiki/O-mikuji (only selected part of the more relevant ones)
@@ -87,5 +88,6 @@ pub enum OmikujiSection {
 pub struct OmikujiMessage {
     pub photo: Option<String>,
     pub class: Option<OmikujiClass>,
+    pub description: Option<String>,
     pub sections: Vec<(OmikujiSection, String)>,
 }
